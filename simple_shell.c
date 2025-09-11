@@ -36,8 +36,6 @@ void addCommandtoHis(char*command , pid_t pid , Timeval startTime , Timeval endT
     if ( pid !=-1 ){  // This implies that the process ID is valid 
         if ( CMDHIS_ind < MAX_SIZE_OF_HISTORY ){ // have enough space to add more command to history 
             CMDHIS[CMDHIS_ind].command = strdup(command) ; // use strdup for making copy of command we are not using strcpy because we want to point to the new one
-
-            CMDHIS[CMDHIS_ind].command = strdup(command) ; // 
             CMDHIS[CMDHIS_ind].pid = pid ;
             
         }
