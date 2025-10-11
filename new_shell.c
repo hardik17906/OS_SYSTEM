@@ -196,52 +196,19 @@ static int send_msg_to_scheduler(pid_t pid, const char *name){
 
 // submit one job : fork+exec the job binary, record in shared memory and notify scheduler
 static int submit_job_one(const char *path){
+    // disallowing pipes in a submission
     if (strstr(path, "|") != NULL){
         fprintf(stderr, "submit: pipes not allowed: %s\n", path);
         return -1;
     }
-
-    int pipefd[2];
-    if (pipe(pipefd) == -1) {
-        perror("pipe");
-        return -1;
-    }
-
     pid_t pid = fork();
-    if (pid < 0){
-        perror("fork");
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return -1;
-    }
+    if (pid < 0){ perror("fork"); return -1; }
     else if (pid == 0){
-        // child
-        close(pipefd[0]); // close read end
         if (setpgid(0,0) == -1) { /* ignore */ }
-
         execl(path, path, (char*)NULL);
-        // execl failed:
         perror("execl");
-        // write a single byte to signal failure
-        write(pipefd[1], "X", 1);
-        close(pipefd[1]);
         _exit(127);
     } else {
-        close(pipefd[1]); // close write end in parent
-        char buf;
-        ssize_t n = read(pipefd[0], &buf, 1);
-        close(pipefd[0]);
-
-        int child_status;
-        waitpid(pid, &child_status, 0);
-
-        // If we read a byte => execl failed
-        if (n == 1) {
-            // don't register or send to scheduler
-            return -1;
-        }
-
-        // otherwise execl succeeded, so register job
         if (shm_tbl != NULL){
             int idx = -1;
             for (int i = 0; i < MAX_JOBS; ++i){
@@ -266,7 +233,6 @@ static int submit_job_one(const char *path){
     }
     return 0;
 }
-
 
 // This function is used to submit multiple tokens separated by whitespace
 static int submit_job_multi(const char *args_str){
