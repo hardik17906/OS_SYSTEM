@@ -14,7 +14,7 @@ Pros3_EXE = Pros3
 SHELL_SRC = new_shell.c
 SCHED_SRC = scheduler.c
 Pros1_SRC = pros1.c
-Pros2_SRC = pros.c
+Pros2_SRC = pros2.c
 Pros3_SRC = pros3.c
 
 # Object files
