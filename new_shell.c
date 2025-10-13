@@ -201,7 +201,6 @@ static int submit_job_one(const char *path){
         fprintf(stderr, "submit: pipes not allowed: %s\n", path);
         return -1;
     }
-
     // Check if file exists and is executable
     struct stat st;
     if (stat(path, &st) != 0) {
@@ -245,27 +244,30 @@ static int submit_job_one(const char *path){
     }
     return 0;
 }
-
-
-
 // Final stat printing 
 static void print_final_stats(int tsl_ms){
     if (!shm_tbl) return;
     printf("\nFinal job statistics (TSLICE = %d ms):\n", tsl_ms);
     printf("%-30s %-8s %-12s %-10s\n", "Name", "PID", "Completion", "Wait");
+
     for (int i = 0; i < MAX_JOBS; ++i){
         job_info_t *j = &shm_tbl->jobs[i];
         if (j->pid == 0) continue;
-        int completion_q = (j->completion_q >= 0) ? j->completion_q : shm_tbl->global_quantum;
+
         int submit_q = (j->submit_q >= 0) ? j->submit_q : 0;
-        int completion_time = completion_q - submit_q + 1;
-        if (completion_time <= 0) completion_time = 1;
+        int completion_q = (j->completion_q >= 0) ? j->completion_q : shm_tbl->global_quantum;
+
+        int completion_time = completion_q - submit_q;
+        if (completion_time < 0) completion_time = 0;
+
         int wait_time = completion_time - j->run_quanta;
         if (wait_time < 0) wait_time = 0;
+
         printf("%-30s %-8d %-12d %-10d\n", j->name, (int)j->pid, completion_time, wait_time);
     }
     printf("-------------------------------------------------\n");
 }
+
 
 // SIGCHLD: reap children and mark finished in shared table 
 static void sigchld_handler(int sig){
@@ -353,7 +355,6 @@ static void shellLoop(int NCPU, int TSLICE_ms){
         free(command);
     }
 }
-
 int main(int argc, char **argv){
     if (argc != 3){
         fprintf(stderr, "Usage: %s <NCPU> <TSLICE_ms>\n", argv[0]);
@@ -365,24 +366,20 @@ int main(int argc, char **argv){
         fprintf(stderr, "NCPU and TSLICE_ms must be positive\n");
         return 1;
     }
-
     if (create_shared_table() != 0){
         fprintf(stderr, "Failed to create shared table\n");
         return 1;
     }
-
     // sigchild handler updater 
     struct sigaction sa = {0};
     sa.sa_handler = sigchld_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
     if (sigaction(SIGCHLD, &sa, NULL) == -1) perror("sigaction(SIGCHLD)");
-
     // create control pipe and fork scheduler 
     int ctrl_pipe[2];
     if (pipe(ctrl_pipe) == -1){ perror("pipe"); return 1; }
     ctrl_pipe_w = ctrl_pipe[1];
-
     scheduler_pid = fork();
     if (scheduler_pid < 0){ perror("fork"); return 1; }
     else if (scheduler_pid == 0){
@@ -398,6 +395,5 @@ int main(int argc, char **argv){
         close(ctrl_pipe[0]);
         shellLoop(NCPU, TSLICE_ms);
     }
-
     return 0;
 }
