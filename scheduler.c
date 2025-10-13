@@ -1,4 +1,4 @@
- #define _GNU_SOURCE
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,11 +6,11 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
-#include <sys/poll.h>
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <sys/wait.h>
 
 #define MAX_JOBS 1024
 #define MAX_NAME 256
@@ -124,9 +124,13 @@ int main(int argc, char **argv){
     int running_count = 0;
     int shutdown_requested = 0;
 
-    struct pollfd pfd;
-    pfd.fd = ctrl_fd;
-    pfd.events = POLLIN | POLLHUP | POLLERR;
+    /* Make ctrl_fd non-blocking so we can poll it with small sleeps
+       instead of using poll/select. This is the minimal change to
+       remove poll/select while keeping behavior similar. */
+    int flags = fcntl(ctrl_fd, F_GETFL, 0);
+    if (flags != -1) {
+        (void)fcntl(ctrl_fd, F_SETFL, flags | O_NONBLOCK);
+    }
 
     char prev_finished[MAX_JOBS] = {0};
 
@@ -185,23 +189,29 @@ int main(int argc, char **argv){
             }
         }
 
-        //poll for new submissions or shutdown, or wait until quantum expires 
-        int poll_ret = poll(&pfd, 1, TSLICE_ms);
-        if (poll_ret < 0) {
-            if (errno != EINTR) perror("poll");
-        } else if (poll_ret > 0) {
-            if (pfd.revents & (POLLHUP | POLLERR)) shutdown_requested = 1;
-            if ((pfd.revents & POLLIN) && !shutdown_requested) {
+        /*************************************************************
+         * Replace poll/select: use non-blocking read loop with usleep
+         * Wait up to TSLICE_ms milliseconds. If data is available on
+         * ctrl_fd, read the message. Otherwise, simply timeout.
+         *************************************************************/
+        {
+            int elapsed = 0;
+            const int step_ms = 1; /* check every 1 ms to stay responsive */
+            int handled_input = 0;
+
+            while (elapsed < TSLICE_ms && !shutdown_requested) {
+                /* Try to read a pid32 (non-blocking). If no data: EAGAIN/EWOULDBLOCK */
                 int32_t pid32;
-                ssize_t r = read_n(ctrl_fd, &pid32, sizeof(pid32));
-                if (r == 0) {
-                    shutdown_requested = 1;
-                } else if (r < 0) {
-                    perror("read pid");
-                } else if (r == sizeof(pid32)) {
+                ssize_t r = read(ctrl_fd, &pid32, sizeof(pid32));
+                if (r == sizeof(pid32)) {
+                    /* we got pid32, now read the rest (namelen + name) using blocking read_n.
+                       The writer writes the whole message atomically for these small sizes,
+                       so the following read_n should not block indefinitely. */
                     int32_t namelen;
                     if (read_n(ctrl_fd, &namelen, sizeof(namelen)) != sizeof(namelen)) {
                         shutdown_requested = 1;
+                        handled_input = 1;
+                        break;
                     } else {
                         if (pid32 == 0 && namelen == 0) {
                             shutdown_requested = 1;
@@ -212,12 +222,14 @@ int main(int argc, char **argv){
                                 ssize_t got = read_n(ctrl_fd, namebuf, namelen);
                                 if (got != namelen) {
                                     shutdown_requested = 1;
-                                } else {
-                                    namebuf[namelen] = '\0';
+                                    handled_input = 1;
+                                    break;
                                 }
+                                namebuf[namelen] = '\0';
                             } else {
                                 namebuf[0] = '\0';
                             }
+                            /* register job in shared table (same logic as before) */
                             if (!shutdown_requested) {
                                 int found = -1;
                                 for (int i = 0; i < shm_tbl->max_jobs; ++i) {
@@ -247,9 +259,41 @@ int main(int argc, char **argv){
                             }
                         }
                     }
+                    handled_input = 1;
+                    /* After handling an input we keep checking until quantum expires so
+                       other writers can also deliver messages in this quantum. */
+                } else if (r == -1) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        /* no data now; sleep a tiny bit and retry */
+                        usleep(step_ms * 1000);
+                        elapsed += step_ms;
+                        continue;
+                    } else if (errno == EINTR) {
+                        /* interrupted, try again */
+                        continue;
+                    } else {
+                        /* unexpected error reading pipe */
+                        perror("read ctrl_fd");
+                        shutdown_requested = 1;
+                        break;
+                    }
+                } else if (r == 0) {
+                    /* pipe closed by writer -> treat as shutdown request */
+                    shutdown_requested = 1;
+                    break;
+                } else {
+                    /* partial read (less than sizeof(pid32)) - unlikely for an int but handle conservatively:
+                       attempt to read remaining bytes using read_n (non-blocking behavior preserved by O_NONBLOCK).
+                       For simplicity, treat this as no-data and continue (rare path). */
+                    /* we won't attempt complex partial-reads here to keep changes minimal */
+                    usleep(step_ms * 1000);
+                    elapsed += step_ms;
+                    continue;
                 }
             }
+            (void)handled_input;
         }
+
         // stopping the currently running process at quantum end and re-enqueue if process is still alive
         for (int r = 0; r < running_count; ++r){
             int idx = running_idxs[r];
