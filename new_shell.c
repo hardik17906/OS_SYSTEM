@@ -201,6 +201,18 @@ static int submit_job_one(const char *path){
         fprintf(stderr, "submit: pipes not allowed: %s\n", path);
         return -1;
     }
+
+    // Check if file exists and is executable
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        fprintf(stderr, "submit: %s: No such file or directory\n", path);
+        return -1;
+    }
+    if (!(st.st_mode & S_IXUSR)) {
+        fprintf(stderr, "submit: %s: not executable\n", path);
+        return -1;
+    }
+
     pid_t pid = fork();
     if (pid < 0){ perror("fork"); return -1; }
     else if (pid == 0){
@@ -220,7 +232,7 @@ static int submit_job_one(const char *path){
                 shm_tbl->jobs[idx].pid = pid;
                 strncpy(shm_tbl->jobs[idx].name, path, MAX_NAME-1);
                 shm_tbl->jobs[idx].name[MAX_NAME-1] = '\0';
-                shm_tbl->jobs[idx].submit_q = shm_tbl->global_quantum + 1;
+                shm_tbl->jobs[idx].submit_q = shm_tbl->global_quantum;
                 shm_tbl->jobs[idx].run_quanta = 0;
                 shm_tbl->jobs[idx].completion_q = -1;
                 shm_tbl->jobs[idx].finished = 0;
@@ -234,19 +246,7 @@ static int submit_job_one(const char *path){
     return 0;
 }
 
-// This function is used to submit multiple tokens separated by whitespace
-static int submit_job_multi(const char *args_str){
-    char *copy = strdup(args_str);
-    if (!copy) return -1;
-    char *tok = strtok(copy, " \t");
-    int any_err = 0;
-    while (tok){
-        if (submit_job_one(tok) != 0) any_err = 1;
-        tok = strtok(NULL, " \t");
-    }
-    free(copy);
-    return any_err ? -1 : 0;
-}
+
 
 // Final stat printing 
 static void print_final_stats(int tsl_ms){
@@ -332,12 +332,14 @@ static void shellLoop(int NCPU, int TSLICE_ms){
             free(last_command);
             break;
         } else if (strncmp(command, "submit ", 7) == 0){
-            const char *args = command + 7;
-            while (*args && isspace((unsigned char)*args)) args++;
-            if (*args == '\0'){
-                fprintf(stderr, "Usage: submit ./a.out [./b.out ...]\n");
+            const char *arg = command + 7;
+            while (*arg && isspace((unsigned char)*arg)) arg++;
+            if (*arg == '\0'){
+                fprintf(stderr, "Usage: submit ./a.out\n");
             } else {
-                if (submit_job_multi(args) != 0) fprintf(stderr, "One or more submits failed\n");
+                if (submit_job_one(arg) != 0) {
+                    fprintf(stderr, "submit failed\n");
+                }
             }
         } else if (strcmp(command, "history") == 0){
             displayCommands();
