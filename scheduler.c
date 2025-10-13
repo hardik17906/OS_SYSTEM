@@ -11,10 +11,8 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/wait.h>
-
 #define MAX_JOBS 1024
 #define MAX_NAME 256
-
 typedef struct {
     pid_t pid;
     char name[MAX_NAME];
@@ -118,22 +116,15 @@ int main(int argc, char **argv){
         return 1;
     }
     shm_table_t *shm_tbl = (shm_table_t *)map;
-
     rq_t ready; rq_init(&ready);
     int running_idxs[128];
     int running_count = 0;
     int shutdown_requested = 0;
-
-    /* Make ctrl_fd non-blocking so we can poll it with small sleeps
-       instead of using poll/select. This is the minimal change to
-       remove poll/select while keeping behavior similar. */
     int flags = fcntl(ctrl_fd, F_GETFL, 0);
     if (flags != -1) {
         (void)fcntl(ctrl_fd, F_SETFL, flags | O_NONBLOCK);
     }
-
     char prev_finished[MAX_JOBS] = {0};
-
     //enqueue any jobs already registered in shm before exec 
     for (int i = 0; i < shm_tbl->max_jobs; ++i){
         if (shm_tbl->jobs[i].pid != 0 && !shm_tbl->jobs[i].finished){
@@ -141,12 +132,10 @@ int main(int argc, char **argv){
         }
         if (shm_tbl->jobs[i].finished) prev_finished[i] = 1;
     }
-
     while (1){
         // starting the quantum
         shm_tbl->global_quantum++;
         int my_q = shm_tbl->global_quantum;
-
         // here we are picking up NCPU Proccess from the ready queue to work upon
         running_count = 0;
         for (int i = 0; i < NCPU; ++i){
@@ -154,7 +143,6 @@ int main(int argc, char **argv){
             if (rq_pop(&ready, &idx) != 0) break;
             pid_t pid = shm_tbl->jobs[idx].pid;
             if (pid <= 0 || shm_tbl->jobs[idx].finished) continue;
-
             if (!pid_exists(pid)){
                 shm_tbl->jobs[idx].finished = 1;
                 shm_tbl->jobs[idx].completion_q = my_q;
@@ -167,7 +155,6 @@ int main(int argc, char **argv){
                 }
                 continue;
             }
-
             if (kill(pid, SIGCONT) == -1) {
                 if (errno == ESRCH) {
                     shm_tbl->jobs[idx].finished = 1;
@@ -188,25 +175,15 @@ int main(int argc, char **argv){
                 running_idxs[running_count++] = idx;
             }
         }
-
-        /*************************************************************
-         * Replace poll/select: use non-blocking read loop with usleep
-         * Wait up to TSLICE_ms milliseconds. If data is available on
-         * ctrl_fd, read the message. Otherwise, simply timeout.
-         *************************************************************/
         {
             int elapsed = 0;
             const int step_ms = 1; /* check every 1 ms to stay responsive */
             int handled_input = 0;
-
             while (elapsed < TSLICE_ms && !shutdown_requested) {
                 /* Try to read a pid32 (non-blocking). If no data: EAGAIN/EWOULDBLOCK */
                 int32_t pid32;
                 ssize_t r = read(ctrl_fd, &pid32, sizeof(pid32));
                 if (r == sizeof(pid32)) {
-                    /* we got pid32, now read the rest (namelen + name) using blocking read_n.
-                       The writer writes the whole message atomically for these small sizes,
-                       so the following read_n should not block indefinitely. */
                     int32_t namelen;
                     if (read_n(ctrl_fd, &namelen, sizeof(namelen)) != sizeof(namelen)) {
                         shutdown_requested = 1;
@@ -278,14 +255,10 @@ int main(int argc, char **argv){
                         break;
                     }
                 } else if (r == 0) {
-                    /* pipe closed by writer -> treat as shutdown request */
+                    //pipe closed by writer -> treat as shutdown request
                     shutdown_requested = 1;
                     break;
                 } else {
-                    /* partial read (less than sizeof(pid32)) - unlikely for an int but handle conservatively:
-                       attempt to read remaining bytes using read_n (non-blocking behavior preserved by O_NONBLOCK).
-                       For simplicity, treat this as no-data and continue (rare path). */
-                    /* we won't attempt complex partial-reads here to keep changes minimal */
                     usleep(step_ms * 1000);
                     elapsed += step_ms;
                     continue;
@@ -293,7 +266,6 @@ int main(int argc, char **argv){
             }
             (void)handled_input;
         }
-
         // stopping the currently running process at quantum end and re-enqueue if process is still alive
         for (int r = 0; r < running_count; ++r){
             int idx = running_idxs[r];
@@ -360,7 +332,6 @@ int main(int argc, char **argv){
             if (!any_unfinished) break;
         }
     }
-
     munmap(shm_tbl, sz);
     close(shm_fd);
     close(ctrl_fd);
